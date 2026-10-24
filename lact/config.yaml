@@ -7,12 +7,6 @@ apply_settings_timer: 5
 gpus:
   10DE:2705-1043:896B-0000:01:00.0:
     fan_control_enabled: false
-    min_core_clock: 210
-    max_core_clock: 2760
-    gpu_clock_offsets:
-      0: 177
-    mem_clock_offsets:
-      0: 1000
 profiles:
   Stable Undervolt:
     gpus:
