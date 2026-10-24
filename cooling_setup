@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Set up fan control on a fresh Arch (or CachyOS) install of this machine:
-#   - MSI MAG B660M MORTAR (MS-7D42) fan controller driver (nct6687d, DKMS)
-#   - CoolerControl
+# Restore fan and GPU settings on a fresh Arch (or CachyOS) install of this machine:
 #   - the backed-up CoolerControl config in ./coolercontrol/
 #   - LACT with the GPU undervolt in ./lact/ (clocks only: CoolerControl owns all fans)
 #
-# Run as your normal user (AUR packages can't be built as root); sudo is used where needed.
+# The install must already have the MSI MAG B660M MORTAR (MS-7D42) fan controller driver
+# (nct6687d) and CoolerControl. Run as your normal user; sudo is used where needed.
 # Safe to re-run.
 set -euo pipefail
 
@@ -18,7 +17,6 @@ expected_board="MS-7D42"
 info() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
-in_repos() { pacman -Si "$1" &>/dev/null; }
 
 [[ $EUID -ne 0 ]] || die "run this as your normal user, not root (sudo is used where needed)"
 command -v pacman >/dev/null || die "pacman not found: this script is for Arch-based systems"
@@ -31,7 +29,7 @@ if grep -q 'fan_control_enabled: *true' "$lact_config"; then
     die "$lact_config enables LACT fan control: GPU fans must stay with CoolerControl"
 fi
 
-# --- Sanity check: the configs and driver are specific to this board ---------------------------
+# --- Sanity check: the configs are specific to this board ---------------------------------------
 board=$(cat /sys/class/dmi/id/board_name 2>/dev/null || echo unknown)
 if [[ $board != *"$expected_board"* ]]; then
     warn "this board is '$board', the backup was made on '$expected_board'"
@@ -41,66 +39,13 @@ fi
 
 sudo -v
 
-# --- Build tools and kernel headers (DKMS needs headers for every installed kernel) ------------
-info "Installing build tools and kernel headers"
-packages=(base-devel git dkms)
-for pkgbase in /usr/lib/modules/*/pkgbase; do
-    [[ -f $pkgbase ]] || continue
-    headers="$(cat "$pkgbase")-headers"
-    if in_repos "$headers"; then
-        packages+=("$headers")
-    else
-        warn "no headers package '$headers' found, the driver won't be built for that kernel"
-    fi
-done
-sudo pacman -Syu --needed --noconfirm "${packages[@]}"
-[[ -d /usr/lib/modules/$(uname -r) ]] || die "the kernel was just updated: reboot and re-run this script"
-
-# --- AUR helper ---------------------------------------------------------------------------------
-if command -v paru >/dev/null; then
-    aur=paru
-elif command -v yay >/dev/null; then
-    aur=yay
-elif in_repos paru; then
-    info "Installing paru"
-    sudo pacman -S --needed --noconfirm paru
-    aur=paru
-else
-    info "Building paru-bin from the AUR"
-    tmp=$(mktemp -d)
-    git clone --depth 1 https://aur.archlinux.org/paru-bin.git "$tmp/paru-bin"
-    (cd "$tmp/paru-bin" && makepkg -si --noconfirm)
-    rm -rf "$tmp"
-    aur=paru
-fi
-
-# --- Motherboard fan controller driver ----------------------------------------------------------
-# The in-kernel nct6683 driver can read the NCT6687D but can't set fan speeds on MSI boards.
-info "Installing the nct6687d driver"
-$aur -S --needed --noconfirm nct6687d-dkms-git
-
-echo nct6687 | sudo tee /etc/modules-load.d/nct6687.conf >/dev/null
-echo "blacklist nct6683" | sudo tee /etc/modprobe.d/nct6683-blacklist.conf >/dev/null
-
-if lsmod | grep -q '^nct6683 '; then
-    sudo modprobe -r nct6683 || warn "couldn't unload nct6683, a reboot will fix that"
-fi
-if ! sudo modprobe nct6687; then
-    die "couldn't load nct6687. If dmesg mentions an ACPI resource conflict, add
-       acpi_enforce_resources=lax to the kernel command line, reboot and re-run this script."
-fi
-
+# --- Prerequisites from the fresh install -------------------------------------------------------
+# The install already provides the nct6687d fan controller driver and CoolerControl.
+info "Checking the fan controller driver and CoolerControl are installed"
 nct=$(grep -lx nct6687 /sys/class/hwmon/*/name 2>/dev/null | head -1 || true)
-[[ -n $nct && -e $(dirname "$nct")/pwm1 ]] || die "nct6687 loaded but no PWM outputs showed up"
+[[ -n $nct && -e $(dirname "$nct")/pwm1 ]] || die "the nct6687 fan controller driver isn't loaded (no PWM outputs found)"
 echo "nct6687 driver loaded: $(dirname "$nct")"
-
-# --- CoolerControl ------------------------------------------------------------------------------
-info "Installing CoolerControl"
-if in_repos coolercontrol; then
-    sudo pacman -S --needed --noconfirm coolercontrol   # CachyOS repos
-else
-    $aur -S --needed --noconfirm coolercontrol
-fi
+systemctl cat coolercontrold.service &>/dev/null || die "CoolerControl isn't installed"
 
 if ! command -v nvidia-smi >/dev/null; then
     warn "nvidia-smi not found: install the NVIDIA driver (nvidia-utils) for GPU fan control"
@@ -176,4 +121,4 @@ else
     echo "GPU clock settings applied to $gpu_key"
 fi
 
-info "Done. Open CoolerControl to check the fans, and reboot once to confirm the driver loads on boot."
+info "Done. Open CoolerControl to check the fans, and LACT to check the GPU clocks."
