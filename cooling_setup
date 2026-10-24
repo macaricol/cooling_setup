@@ -3,6 +3,7 @@
 #   - MSI MAG B660M MORTAR (MS-7D42) fan controller driver (nct6687d, DKMS)
 #   - CoolerControl
 #   - the backed-up CoolerControl config in ./coolercontrol/
+#   - LACT with the GPU undervolt in ./lact/ (clocks only: CoolerControl owns all fans)
 #
 # Run as your normal user (AUR packages can't be built as root); sudo is used where needed.
 # Safe to re-run.
@@ -11,6 +12,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 backup="$here/coolercontrol"
 config_files=(config.toml calibrations.json overrides.toml modes.json alerts.json config-ui.json)
+lact_config="$here/lact/config.yaml"
 expected_board="MS-7D42"
 
 info() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -23,6 +25,11 @@ command -v pacman >/dev/null || die "pacman not found: this script is for Arch-b
 for f in "${config_files[@]}"; do
     [[ -f "$backup/$f" ]] || die "missing backup file: $backup/$f"
 done
+[[ -f $lact_config ]] || die "missing backup file: $lact_config"
+# Two daemons driving the same fans keep overwriting each other
+if grep -q 'fan_control_enabled: *true' "$lact_config"; then
+    die "$lact_config enables LACT fan control: GPU fans must stay with CoolerControl"
+fi
 
 # --- Sanity check: the configs and driver are specific to this board ---------------------------
 board=$(cat /sys/class/dmi/id/board_name 2>/dev/null || echo unknown)
@@ -144,6 +151,29 @@ elif [[ -n $missing ]]; then
     warn "open CoolerControl and re-assign the profiles to those devices' fans"
 else
     echo "all devices found, fan profiles applied"
+fi
+
+# --- LACT: GPU undervolt (+177 MHz offset, capped at 2760 MHz, i.e. ~985 mV) ---------------------
+info "Installing LACT and restoring the GPU clock settings"
+sudo pacman -S --needed --noconfirm lact
+
+if sudo test -f /etc/lact/config.yaml; then
+    saved="/etc/lact/config.yaml.bak-$(date +%Y%m%d-%H%M%S)"
+    sudo cp -a /etc/lact/config.yaml "$saved"
+    echo "existing config saved to $saved"
+fi
+sudo install -Dm644 -o root -g root "$lact_config" /etc/lact/config.yaml
+sudo systemctl enable lactd
+sudo systemctl restart lactd
+
+# The GPU entry is keyed by PCI IDs and slot; if this GPU's key differs, the settings won't apply.
+gpu_key=$(sed -n 's/^  \([0-9A-F]\{4\}:.*\):$/\1/p' "$lact_config")
+gpu_slot=${gpu_key##*-}
+gpu_slot=${gpu_slot,,}
+if [[ ! -e /sys/bus/pci/devices/$gpu_slot ]]; then
+    warn "no GPU at PCI slot $gpu_slot (from $gpu_key): set the clocks again in LACT"
+else
+    echo "GPU clock settings applied to $gpu_key"
 fi
 
 info "Done. Open CoolerControl to check the fans, and reboot once to confirm the driver loads on boot."
